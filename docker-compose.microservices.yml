@@ -1,0 +1,132 @@
+# Microservices backend: API Gateway + 4 services, each with its own database.
+#   docker compose -f docker-compose.microservices.yml up -d --build
+# Entry point: http://localhost:8080
+name: portal-microservices
+
+x-common-env: &common-env
+  JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+  INTERNAL_API_KEY: ${INTERNAL_API_KEY:-internal-key-change-me}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+
+services:
+  # ---------- Databases (database-per-service) ----------
+  auth-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: auth_db
+    volumes: [auth-db-data:/var/lib/postgresql/data]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d auth_db"]
+      interval: 5s
+      retries: 10
+
+  results-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: results_db
+    volumes: [results-db-data:/var/lib/postgresql/data]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d results_db"]
+      interval: 5s
+      retries: 10
+
+  course-db:
+    image: mongo:7
+    volumes: [course-db-data:/data/db]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 10
+
+  payment-db:
+    image: mongo:7
+    volumes: [payment-db-data:/data/db]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 10
+
+  # ---------- External dependency (mocked) ----------
+  mock-payment-gateway:
+    build: ./mock-payment-gateway
+    environment:
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-150}
+      MOCK_FAILURE_RATE: ${MOCK_FAILURE_RATE:-0}
+    restart: unless-stopped
+
+  # ---------- Services ----------
+  auth-service:
+    build: ./services/auth-service
+    environment:
+      <<: *common-env
+      PORT: 3001
+      DATABASE_URL: postgres://postgres:postgres@auth-db:5432/auth_db
+      ADMIN_SIGNUP_KEY: ${ADMIN_SIGNUP_KEY:-admin-key-change-me}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-10}
+    depends_on:
+      auth-db: { condition: service_healthy }
+    restart: unless-stopped
+
+  course-service:
+    build: ./services/course-service
+    environment:
+      <<: *common-env
+      PORT: 3002
+      MONGO_URL: mongodb://course-db:27017
+      MONGO_DB: course_db
+      RESULTS_SERVICE_URL: http://results-service:3003
+    depends_on:
+      course-db: { condition: service_healthy }
+    restart: unless-stopped
+
+  results-service:
+    build: ./services/results-service
+    environment:
+      <<: *common-env
+      PORT: 3003
+      DATABASE_URL: postgres://postgres:postgres@results-db:5432/results_db
+    depends_on:
+      results-db: { condition: service_healthy }
+    restart: unless-stopped
+
+  payment-service:
+    build: ./services/payment-service
+    environment:
+      <<: *common-env
+      PORT: 3004
+      MONGO_URL: mongodb://payment-db:27017
+      MONGO_DB: payment_db
+      PAYMENT_GATEWAY_URL: http://mock-payment-gateway:4000
+    depends_on:
+      payment-db: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ---------- API Gateway (only container exposed to the host) ----------
+  gateway:
+    build: ./gateway
+    ports: ["8080:8080"]
+    environment:
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      PORT: 8080
+      AUTH_SERVICE_URL: http://auth-service:3001
+      COURSE_SERVICE_URL: http://course-service:3002
+      RESULTS_SERVICE_URL: http://results-service:3003
+      PAYMENT_SERVICE_URL: http://payment-service:3004
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-600}
+    # Started after the services, but not tied to their health,
+    # so the gateway keeps running during the fault-isolation test.
+    depends_on: [auth-service, course-service, results-service, payment-service]
+    restart: unless-stopped
+
+volumes:
+  auth-db-data:
+  results-db-data:
+  course-db-data:
+  payment-db-data:

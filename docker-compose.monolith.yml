@@ -1,0 +1,42 @@
+# Monolithic backend: one application, one shared PostgreSQL database.
+#   docker compose -f docker-compose.monolith.yml up -d --build
+# Entry point: http://localhost:3000
+name: portal-monolith
+
+services:
+  monolith-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: monolith_db
+    volumes: [monolith-db-data:/var/lib/postgresql/data]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d monolith_db"]
+      interval: 5s
+      retries: 10
+
+  mock-payment-gateway:
+    build: ./mock-payment-gateway
+    environment:
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-150}
+      MOCK_FAILURE_RATE: ${MOCK_FAILURE_RATE:-0}
+    restart: unless-stopped
+
+  monolith:
+    build: ./monolith
+    ports: ["3000:3000"]
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://postgres:postgres@monolith-db:5432/monolith_db
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      ADMIN_SIGNUP_KEY: ${ADMIN_SIGNUP_KEY:-admin-key-change-me}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-10}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      PAYMENT_GATEWAY_URL: http://mock-payment-gateway:4000
+    depends_on:
+      monolith-db: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  monolith-db-data:
